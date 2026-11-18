@@ -54,6 +54,13 @@ const sales = read<PhoneSale[]>('sales_data.json').sort((a, b) => a.timestamp - 
 
 const prisma = new PrismaClient();
 const D = (n: number) => new Prisma.Decimal(n);
+/** Movimientos generados por el seed o por este importador (los demás vienen de la app). */
+const IMPORT_REASONS = [
+  'Stock inicial importado del celular de la tienda',
+  'Ajuste: stock real del celular de la tienda (importación)',
+  'Stock inicial (catálogo oficial)',
+  'Stock inicial (seed)',
+];
 const warnings: string[] = [];
 
 /** Vendedores del celular -> usuario del servidor. */
@@ -120,12 +127,13 @@ async function main() {
     for (const p of catalog) {
       const data = { name: p.name.trim(), category: p.category, price: p.price, description: p.description ?? null, isActive: p.isActive ?? true };
       const exists = await tx.product.findUnique({ where: { id: p.id } });
-      if (exists) { await tx.product.update({ where: { id: p.id }, data }); updated++; }
+      // El catálogo ya se administra en el servidor: solo se crean los productos que falten.
+      if (exists) { updated++; continue; }
       else { await tx.product.create({ data: { id: p.id, ...data } }); created++; }
     }
-    const extra = await tx.product.updateMany({ where: { id: { notIn: catalog.map((p) => p.id) }, isActive: true }, data: { isActive: false } });
+    const extra = { count: 0 }; // ya no se desactiva nada: el servidor es la fuente del catálogo
     const noRecipe = await tx.product.findMany({ where: { isActive: true, recipe: null, category: { not: 'Leches' } }, select: { name: true } });
-    summary.productos = { creados: created, actualizados: updated, desactivadosNoEstanEnCelular: extra.count, sinReceta: noRecipe.map((p) => p.name) };
+    summary.productos = { creados: created, yaExistian: updated, desactivadosNoEstanEnCelular: extra.count, sinReceta: noRecipe.map((p) => p.name) };
 
     // ---------- 3) Inventario (stock del celular) ----------
     let itemsCreated = 0, adjusted = 0;
@@ -156,6 +164,13 @@ async function main() {
         continue;
       }
       if (current.unit !== it.unit) warnings.push(`${it.id}: unidad en servidor "${current.unit}" vs celular "${it.unit}" (se dejó la del servidor)`);
+      // Si alguien ya movió este insumo desde la app conectada al servidor (reconteo,
+      // compra, traslado, venta), el servidor manda: no se pisa con el celular viejo.
+      const last = await tx.inventoryMovement.findFirst({ where: { inventoryItemId: it.id }, orderBy: { createdAt: 'desc' } });
+      if (last && !IMPORT_REASONS.includes(last.reason ?? '')) {
+        warnings.push(`${it.id}: NO se tocó (servidor ${current.currentStock} ${current.unit}, celular ${it.currentStock}); último movimiento en servidor: ${last.type} de ${last.userName ?? '?'} "${last.reason ?? ''}"`);
+        continue;
+      }
       const delta = D(it.currentStock).minus(current.currentStock);
       await tx.inventoryItem.update({ where: { id: it.id }, data: { currentStock: D(it.currentStock), isActive: true } });
       if (!delta.isZero()) {

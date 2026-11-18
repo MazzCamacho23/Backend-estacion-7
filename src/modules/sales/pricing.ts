@@ -4,12 +4,45 @@ import { badRequest } from '../../lib/errors';
 import type { Tx } from '../../lib/prisma';
 import { prisma } from '../../lib/prisma';
 
+/**
+ * La app Android trae una lista fija de leches con IDs propios. Se traducen a los
+ * productos de la categoría "Leches" del catálogo (que tienen el precio real).
+ *  - leche entera = la leche base de la receta: no es una sustitución.
+ *  - deslactosada / soya: no están configuradas como producto todavía.
+ */
+const MILK_ALIASES: Record<string, string | null> = {
+  leche_entera: null,
+  leche_avena: '31',
+  leche_almendra: '32',
+};
+const UNCONFIGURED_MILKS: Record<string, string> = {
+  leche_deslactosada: 'Leche deslactosada',
+  leche_soya: 'Leche de soya',
+};
+
+const milkOptionIdSchema = z
+  .string()
+  .trim()
+  .nullish()
+  .transform((id) => {
+    if (!id) return null;
+    if (id in MILK_ALIASES) return MILK_ALIASES[id]!;
+    if (id in UNCONFIGURED_MILKS) {
+      throw badRequest(
+        `${UNCONFIGURED_MILKS[id]} no está configurada en el catálogo. Véndela con leche entera o pide a una administradora que la cree en "Leches".`,
+        'MILK_NOT_CONFIGURED',
+        { milkOptionId: id },
+      );
+    }
+    return id;
+  });
+
 /** Lo que manda el celular por cada producto (sin precios: los pone el servidor). */
 export const lineInputSchema = z.object({
   productId: z.string().min(1),
   quantity: z.number().int().min(1).max(100),
   toppingIds: z.array(z.string().min(1)).max(10).default([]),
-  milkOptionId: z.string().min(1).nullish(),
+  milkOptionId: milkOptionIdSchema,
   observations: z.string().trim().max(300).nullish(),
 });
 export type LineInput = z.infer<typeof lineInputSchema>;
