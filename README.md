@@ -3,7 +3,36 @@
 API REST + WebSockets para el POS/ERP Android de Estación Siete Café.
 Conecta tablets y celulares de administradores y vendedores en tiempo real.
 
-**Stack:** Node.js 20+ · TypeScript · Express 5 · PostgreSQL · Prisma 6 · Socket.io 4 · Zod · JWT
+**Stack:** Node.js 20+ · TypeScript · Express 5 · PostgreSQL (Neon) · Prisma 6 · Socket.io 4 · Zod · JWT
+
+---
+
+## 0. Cómo funciona (visión general)
+
+```
+ Celulares / tablets (app Android)                      Servidor (este repo)                 Base de datos
+ ┌──────────────────────────────┐   HTTPS  REST /api/v1   ┌───────────────────────┐   SQL    ┌──────────────┐
+ │ Vendedor: cobra, abre mesas, │ ──────────────────────▶ │ Express 5             │ ───────▶ │ PostgreSQL   │
+ │ abre/cierra su turno         │                          │  · valida (Zod)       │          │ en Neon      │
+ │ Administrador: catálogo,     │ ◀────────────────────── │  · calcula precios    │ ◀─────── │ (pooler)     │
+ │ inventario, reportes         │   WebSocket (Socket.io)  │  · descuenta stock    │          └──────────────┘
+ └──────────────────────────────┘   eventos en tiempo real │  · emite eventos      │
+                                                           └───────────────────────┘
+```
+
+1. **El servidor es la única fuente de verdad.** Los celulares no calculan precios ni descuentan inventario: envían *qué* se vendió (`productId`, cantidad, adiciones, leche) y el servidor calcula el total con los precios vigentes, aplica la receta y descuenta los insumos del punto de venta.
+2. **Sesión segura.** Cada usuario inicia sesión con correo y contraseña y recibe un *access token* (JWT, 15 min) y un *refresh token* (30 días, rotativo y guardado como hash). Si alguien reutiliza un refresh token ya usado, se cierran todas sus sesiones. Hay dos roles: **OWNER** (administradoras) y **EMPLOYEE** (vendedores).
+3. **Una venta, paso a paso** (`POST /sales`), todo dentro de **una sola transacción**:
+   1. Si el `clientRequestId` ya existe, devuelve la venta original (reintento seguro, sin duplicar).
+   2. Verifica que el vendedor tenga **turno abierto** (los OWNER no lo necesitan).
+   3. Calcula precios desde el catálogo y valida los pagos (efectivo con vuelto, transferencia, datáfono, mixto o cortesía).
+   4. "Explota" las recetas: cuánto café, leche, vasos, etc. consume cada producto (con sustitución de leche si el cliente pidió una vegetal).
+   5. Bloquea las filas de esos insumos, descuenta el stock y deja cada movimiento en el **kardex** (`inventory_movements`).
+   6. Guarda la venta con el costo real de insumos y el margen, y le asigna un **número de ticket** consecutivo.
+   7. Al confirmar, avisa por WebSocket a todos los celulares (`sale.created`, `inventory.updated`, `shift.updated`).
+4. **Tiempo real.** Cuando cambia un producto, una mesa, el inventario o una venta, todos los dispositivos conectados lo reciben al instante. Los vendedores nunca reciben costos ni márgenes.
+5. **Turnos de caja.** Cada vendedor abre su turno con una base en efectivo. El servidor suma en vivo lo cobrado y, al cerrar, compara el efectivo esperado con lo contado (faltante/sobrante).
+6. **Reportes.** Ventas por día, por hora, por vendedor, productos más vendidos, cortesías y valorización del inventario, siempre en hora de Colombia.
 
 ---
 
@@ -31,18 +60,39 @@ npm run dev                   # http://localhost:3000
 Verifica que todo funciona:
 ```bash
 curl http://localhost:3000/health
-npm run test:smoke            # 69 verificaciones E2E (en una BD recién sembrada)
+npm run test:smoke            # 70 verificaciones E2E (SOLO en una BD local recién sembrada)
 ```
 
-### Usuarios del seed (contraseña: `Cambiar123*`)
+> ⛔ **Nunca corras `test:smoke` contra la base de producción (Neon):** crea ventas, turnos y movimientos de prueba.
+
+### Usuarios
 | Nombre | Email | Rol |
 |---|---|---|
 | Adalina Fonseca | adalina@estacionsiete.local | OWNER |
 | Glori Fonseca | glori@estacionsiete.local | OWNER |
 | Leonel | leonel@estacionsiete.local | EMPLOYEE |
 | Nescibeth | nescibeth@estacionsiete.local | EMPLOYEE |
+| Michel | michel@estacionsiete.local | EMPLOYEE (importado del celular) |
+| Jeniffer | jeniffer@estacionsiete.local | EMPLOYEE (importado del celular) |
 
-> ⚠️ Cambia estas contraseñas antes de ir a producción (`PATCH /api/v1/users/:id`).
+La contraseña inicial es la de `SEED_DEFAULT_PASSWORD`. ⚠️ Cámbiala para cada usuario antes de usar la app en producción (`PATCH /api/v1/users/:id`).
+
+### Seed y catálogo
+`npm run db:seed` crea los usuarios que falten (nunca cambia uno existente). El catálogo de `prisma/catalog.ts` **solo se aplica en una base sin ventas**. Con ventas reales, el catálogo oficial es el que se administra desde la app, y el seed no lo modifica salvo que se ejecute con `SEED_FORCE_CATALOG=1`.
+
+### Importar datos del celular (app offline)
+Antes del backend, la tienda vendía con la app guardando todo en archivos JSON locales. `scripts/import-phone-data.ts` los sube a la base:
+```bash
+# 1) Extraer del celular (build debuggable, conectado por USB)
+mkdir -p data-import/raw-AAAAMMDD
+for f in catalog_data inventory_data sales_data; do
+  adb exec-out run-as com.estacion7.caffe.app cat files/$f.json > data-import/raw-AAAAMMDD/$f.json
+done
+# 2) Simular (no guarda nada) y luego aplicar
+npx tsx scripts/import-phone-data.ts data-import/raw-AAAAMMDD
+npx tsx scripts/import-phone-data.ts data-import/raw-AAAAMMDD --apply
+```
+Es **idempotente**: cada venta conserva su UUID del celular, así que correrlo de nuevo solo agrega las ventas nuevas. Los datos extraídos (`data-import/`) **no se suben a git**.
 
 ### Scripts
 | Comando | Qué hace |
@@ -178,15 +228,16 @@ Para **cobrar** una mesa: `POST /sales` con `openTableId`.
 
 **Línea de producto** (usada en ventas y mesas):
 ```json
-{ "productId": "cappuccino_9oz", "quantity": 2, "toppingIds": ["add_vainilla"], "milkOptionId": "milk_almendras", "observations": "sin azúcar" }
+{ "productId": "6", "quantity": 2, "toppingIds": ["26"], "milkOptionId": "32", "observations": "sin azúcar" }
 ```
+(`"6"` = Cappuccino, `"26"` = Syrope Vainilla, `"32"` = Leche de Almendra. Los IDs son los del catálogo de la app.)
 
 **Venta directa en efectivo con vuelto:**
 ```json
 {
   "clientRequestId": "3f1c9a52-7c1e-4b8e-9d0a-2b6f1e8c4a11",
-  "items": [{ "productId": "cappuccino_9oz", "quantity": 2, "toppingIds": ["add_vainilla"] }],
-  "payments": [{ "method": "CASH", "amount": 17000, "receivedAmount": 20000 }]
+  "items": [{ "productId": "6", "quantity": 2 }],
+  "payments": [{ "method": "CASH", "amount": 20000, "receivedAmount": 50000 }]
 }
 ```
 **Cobrar mesa con pago mixto:**
@@ -204,7 +255,7 @@ Para **cobrar** una mesa: `POST /sales` con `openTableId`.
 ```json
 {
   "clientRequestId": "…",
-  "items": [{ "productId": "brownie", "quantity": 1 }],
+  "items": [{ "productId": "36", "quantity": 1 }],
   "courtesy": { "beneficiary": "Adalina Fonseca", "type": "ADMINISTRADOR", "notes": "Reunión de socios" }
 }
 ```
@@ -263,14 +314,18 @@ socket.connect()
 
 ## 6. Despliegue
 
-- **Railway / Render / Fly.io:** conecta el repo, define las variables del `.env.example` y el `Dockerfile` hace el resto (`prisma migrate deploy` corre al arrancar).
+- **Railway (recomendado):** *New Project → Deploy from GitHub repo*. Railway detecta el `Dockerfile`, que compila TypeScript, aplica las migraciones pendientes (`prisma migrate deploy`) y arranca la API.
+  - Variables: `NODE_ENV=production`, `DATABASE_URL` (Neon con pooler), `DATABASE_URL_UNPOOLED` (Neon directa), `JWT_ACCESS_SECRET` (uno propio de producción), `BUSINESS_TIMEZONE=America/Bogota`, `ALLOW_NEGATIVE_STOCK=true`, `CORS_ORIGINS=*`. `PORT` lo asigna Railway.
+  - Health check: `/health`. Región cercana a Neon (US East).
 - **Docker propio:** `docker compose up -d --build`.
 - Usa **HTTPS** siempre (los tokens viajan en cada petición).
-- Para escalar a varias instancias: agregar `@socket.io/redis-adapter`.
+- Una sola instancia: para escalar a varias, agregar `@socket.io/redis-adapter`.
 
 ---
 
 ## 7. Pendientes / decisiones abiertas
 - Pruebas automatizadas con Vitest (unitarias del checkout y del ledger).
-- Rate limiting global y monitoreo (Sentry).
-- Backups automáticos de la BD.
+- Monitoreo de errores (Sentry).
+- Backups automáticos diarios de la BD fuera de Neon (`pg_dump`).
+- Recetas para los productos que aún no tienen (sin receta no descuentan inventario ni calculan costo).
+- Conteo físico de inventario para corregir el stock importado del celular.
