@@ -30,7 +30,7 @@ export function createApp() {
   app.use(
     pinoHttp({
       logger,
-      autoLogging: { ignore: (req) => req.url === '/health' || req.url === '/api/v1/health' },
+      autoLogging: { ignore: (req) => req.url === '/health' || req.url === '/api/v1/health' || req.url === '/ping' },
       customLogLevel: (_req, res, err) => (err || res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info'),
     }),
   );
@@ -54,6 +54,13 @@ export function createApp() {
   };
   app.get('/health', health);
   app.get('/api/v1/health', health);
+
+  // Keep-alive para el plan gratis de Render (cron cada 10 min). NO toca la base
+  // de datos, así Neon puede suspenderse cuando no hay uso (de noche) y no gasta
+  // horas de cómputo del plan gratuito.
+  app.get('/ping', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', time: new Date().toISOString() });
+  });
 
   app.use('/api/v1', apiRouter);
 
