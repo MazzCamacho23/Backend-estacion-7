@@ -1,4 +1,4 @@
-import { type InventoryItem, type InventoryLocation, type MovementType, Prisma } from '@prisma/client';
+import { type InventoryItem, type InventoryLocation, type MovementType, Prisma, type Role } from '@prisma/client';
 import { AppError } from '../../lib/errors';
 import type { Tx } from '../../lib/prisma';
 import type { AuthUser } from '../../lib/tokens';
@@ -92,6 +92,13 @@ export async function applyStockChanges(
   return [...updated.values()];
 }
 
+/** Los vendedores no ven costos ni proveedores (igual que en ventas). */
+export function presentItem(item: InventoryItem, role: Role) {
+  if (role === 'OWNER') return item;
+  const { unitCost: _c, supplier: _s, ...rest } = item;
+  return rest;
+}
+
 export function isLowStock(item: InventoryItem): boolean {
   return item.isActive && item.currentStock.lte(item.minimumStock);
 }
@@ -99,7 +106,10 @@ export function isLowStock(item: InventoryItem): boolean {
 /** Notifica a todos los dispositivos. Llamar DESPUÉS del commit. */
 export function publishInventoryChanges(items: InventoryItem[]) {
   if (!items.length) return;
-  publish(RealtimeEvents.INVENTORY_UPDATED, { items });
   const low = items.filter(isLowStock);
-  if (low.length) publish(RealtimeEvents.INVENTORY_LOW_STOCK, { items: low }, { room: Rooms.STAFF });
+  for (const role of ['OWNER', 'EMPLOYEE'] as const) {
+    const opts = role === 'OWNER' ? { room: Rooms.OWNERS } : { room: Rooms.STAFF, except: Rooms.OWNERS };
+    publish(RealtimeEvents.INVENTORY_UPDATED, { items: items.map((i) => presentItem(i, role)) }, opts);
+    if (low.length) publish(RealtimeEvents.INVENTORY_LOW_STOCK, { items: low.map((i) => presentItem(i, role)) }, opts);
+  }
 }

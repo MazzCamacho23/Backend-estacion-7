@@ -3,6 +3,7 @@ import { InventoryItemType, InventoryLocation, MovementType } from '@prisma/clie
 import { z } from 'zod';
 import { dateKeySchema, idParam, paginationSchema, queryBool, updatedSinceSchema } from '../../lib/validation';
 import { currentUser, requireRole } from '../../middlewares/auth';
+import { presentItem } from './inventory.ledger';
 import * as svc from './inventory.service';
 
 export const inventoryRouter = Router();
@@ -53,11 +54,12 @@ const movementsQuery = paginationSchema.extend({
 // --- Insumos ---------------------------------------------------------------
 
 inventoryRouter.get('/items', async (req, res) => {
-  res.json(await svc.listItems(listQuery.parse(req.query)));
+  const role = currentUser(req).role;
+  res.json((await svc.listItems(listQuery.parse(req.query))).map((i) => presentItem(i, role)));
 });
 
 inventoryRouter.get('/items/:id', async (req, res) => {
-  res.json(await svc.getItem(idParam.parse(req.params).id));
+  res.json(presentItem(await svc.getItem(idParam.parse(req.params).id), currentUser(req).role));
 });
 
 inventoryRouter.post('/items', requireRole('OWNER'), async (req, res) => {
@@ -101,7 +103,9 @@ inventoryRouter.post('/movements/transfer', async (req, res) => {
   const body = z
     .object({ baseKey: z.string().min(1), quantity: qty, reason: z.string().max(300).optional() })
     .parse(req.body);
-  res.status(201).json(await svc.transferWarehouseToPos(body, currentUser(req)));
+  const user = currentUser(req);
+  const r = await svc.transferWarehouseToPos(body, user);
+  res.status(201).json({ ...r, items: r.items.map((i) => presentItem(i, user.role)) });
 });
 
 inventoryRouter.post('/movements/adjustment', requireRole('OWNER'), async (req, res) => {
