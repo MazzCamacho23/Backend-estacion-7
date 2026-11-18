@@ -58,10 +58,10 @@ const warnings: string[] = [];
 
 /** Vendedores del celular -> usuario del servidor. */
 const NEW_EMPLOYEES: Record<string, { name: string; email: string }> = {
-  'e391e604-5ce2-4ae6-beec-e3fc4245e888': { name: 'Michel', email: 'michel@estacionsiete.local' },
-  'ddc818ee-2f15-4933-a4fc-717ed577bcf3': { name: 'Jeniffer', email: 'jeniffer@estacionsiete.local' },
+  'e391e604-5ce2-4ae6-beec-e3fc4245e888': { name: 'Michel', email: 'michel@estacionsiete.co' },
+  'ddc818ee-2f15-4933-a4fc-717ed577bcf3': { name: 'Jeniffer', email: 'jeniffer@estacionsiete.co' },
 };
-const EXISTING_BY_PHONE_ID: Record<string, string> = { '2': 'nescibeth@estacionsiete.local' };
+const EXISTING_BY_PHONE_ID: Record<string, string> = { '2': 'nescibeth@estacionsiete.co' };
 
 function validate() {
   const productIds = new Set(catalog.map((p) => p.id));
@@ -92,7 +92,7 @@ function locationOf(id: string) {
 
 async function main() {
   validate();
-  const owner = await prisma.user.findUniqueOrThrow({ where: { email: 'adalina@estacionsiete.local' } });
+  const owner = await prisma.user.findUniqueOrThrow({ where: { email: 'adalina@estacionsiete.co' } });
   const passwordHash = await bcrypt.hash(process.env.SEED_DEFAULT_PASSWORD ?? 'Cambiar123*', 12);
   const summary: Record<string, unknown> = {};
 

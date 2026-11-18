@@ -15,10 +15,10 @@
 
 - El celular debe estar en **el mismo Wi-Fi** que el PC.
 - Usuarios de prueba (contraseña `Cambiar123*`):
-  - `adalina@estacionsiete.local` (OWNER)
-  - `glori@estacionsiete.local` (OWNER)
-  - `leonel@estacionsiete.local` (EMPLOYEE)
-  - `nescibeth@estacionsiete.local` (EMPLOYEE)
+  - `adalina@estacionsiete.co` (OWNER)
+  - `glori@estacionsiete.co` (OWNER)
+  - `leonel@estacionsiete.co` (EMPLOYEE)
+  - `nescibeth@estacionsiete.co` (EMPLOYEE)
 
 ---
 

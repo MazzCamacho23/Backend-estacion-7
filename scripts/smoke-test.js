@@ -39,11 +39,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   console.log(`\nAPI: ${BASE}`);
   console.log('\n[Auth]');
-  const ownerLogin = await call('POST', '/auth/login', null, { email: 'adalina@estacionsiete.local', password: 'Cambiar123*' });
+  const ownerLogin = await call('POST', '/auth/login', null, { email: 'adalina@estacionsiete.co', password: 'Cambiar123*' });
   check('login administrador', ownerLogin.status === 200 && ownerLogin.body.user.role === 'OWNER', ownerLogin);
-  const empLogin = await call('POST', '/auth/login', null, { email: 'leonel@estacionsiete.local', password: 'Cambiar123*' });
+  const empLogin = await call('POST', '/auth/login', null, { email: 'leonel@estacionsiete.co', password: 'Cambiar123*' });
   check('login vendedor', empLogin.status === 200, empLogin);
-  const bad = await call('POST', '/auth/login', null, { email: 'leonel@estacionsiete.local', password: 'x' });
+  const bad = await call('POST', '/auth/login', null, { email: 'leonel@estacionsiete.co', password: 'x' });
   check('contraseña incorrecta -> 401 INVALID_CREDENTIALS', bad.status === 401 && bad.body.error.code === 'INVALID_CREDENTIALS');
   const OWNER = ownerLogin.body.accessToken, EMP = empLogin.body.accessToken;
 

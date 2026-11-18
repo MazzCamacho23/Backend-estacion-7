@@ -14,10 +14,10 @@ const prisma = new PrismaClient();
 const DEFAULT_PASSWORD = process.env.SEED_DEFAULT_PASSWORD ?? 'Cambiar123*';
 
 const USERS = [
-  { name: 'Adalina Fonseca', email: 'adalina@estacionsiete.local', role: Role.OWNER },
-  { name: 'Glori Fonseca', email: 'glori@estacionsiete.local', role: Role.OWNER },
-  { name: 'Leonel', email: 'leonel@estacionsiete.local', role: Role.EMPLOYEE },
-  { name: 'Nescibeth', email: 'nescibeth@estacionsiete.local', role: Role.EMPLOYEE },
+  { name: 'Adalina Fonseca', email: 'adalina@estacionsiete.co', role: Role.OWNER },
+  { name: 'Glori Fonseca', email: 'glori@estacionsiete.co', role: Role.OWNER },
+  { name: 'Leonel', email: 'leonel@estacionsiete.co', role: Role.EMPLOYEE },
+  { name: 'Nescibeth', email: 'nescibeth@estacionsiete.co', role: Role.EMPLOYEE },
 ];
 
 async function seedUsers() {

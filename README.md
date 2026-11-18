@@ -68,14 +68,14 @@ npm run test:smoke            # 70 verificaciones E2E (SOLO en una BD local reci
 ### Usuarios
 | Nombre | Email | Rol |
 |---|---|---|
-| Adalina Fonseca | adalina@estacionsiete.local | OWNER |
-| Glori Fonseca | glori@estacionsiete.local | OWNER |
-| Leonel | leonel@estacionsiete.local | EMPLOYEE |
-| Nescibeth | nescibeth@estacionsiete.local | EMPLOYEE |
-| Michel | michel@estacionsiete.local | EMPLOYEE (importado del celular) |
-| Jeniffer | jeniffer@estacionsiete.local | EMPLOYEE (importado del celular) |
+| Adalina Fonseca | adalina@estacionsiete.co | OWNER |
+| Glori Fonseca | glori@estacionsiete.co | OWNER |
+| Leonel | leonel@estacionsiete.co | EMPLOYEE |
+| Nescibeth | nescibeth@estacionsiete.co | EMPLOYEE |
+| Michel | michel@estacionsiete.co | EMPLOYEE (importado del celular) |
+| Jeniffer | jeniffer@estacionsiete.co | EMPLOYEE (importado del celular) |
 
-La contraseña inicial es la de `SEED_DEFAULT_PASSWORD`. ⚠️ Cámbiala para cada usuario antes de usar la app en producción (`PATCH /api/v1/users/:id`).
+`SEED_DEFAULT_PASSWORD` solo aplica a usuarios creados por el seed en una base nueva. En producción cada persona tiene su propia contraseña (asignadas el 2026-11-17); para cambiarla: `PATCH /api/v1/users/:id` (OWNER).
 
 ### Seed y catálogo
 `npm run db:seed` crea los usuarios que falten (nunca cambia uno existente). El catálogo de `prisma/catalog.ts` **solo se aplica en una base sin ventas**. Con ventas reales, el catálogo oficial es el que se administra desde la app, y el seed no lo modifica salvo que se ejecute con `SEED_FORCE_CATALOG=1`.
