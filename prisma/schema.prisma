@@ -1,0 +1,411 @@
+// =============================================================================
+//  Estación Siete Café — Esquema de base de datos (PostgreSQL)
+//
+//  Convenciones:
+//   - Dinero en pesos COP como Int (sin decimales).
+//   - Cantidades de inventario y recetas como Decimal(14,3) (g, ml, unidades...).
+//   - Costos unitarios como Decimal(14,4): 1 L de leche a $4.500 = $4,5 por ml.
+//   - Nombres (producto, vendedor, ítem) se guardan como "snapshot" en ventas y
+//     movimientos para que el histórico no cambie si luego se renombra algo.
+//   - Tablas y columnas en snake_case vía @@map / @map.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Neon: la API usa la conexión con pooler (DATABASE_URL, PgBouncer) y las
+// migraciones usan la conexión directa (DATABASE_URL_UNPOOLED), porque las
+// migraciones requieren bloqueos/sesión que el pooler no garantiza.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ----------------------------------------------------------------------------
+//  Enums
+// ----------------------------------------------------------------------------
+
+enum Role {
+  OWNER // Administrador
+  EMPLOYEE // Vendedor
+}
+
+enum InventoryItemType {
+  BASE_INGREDIENT
+  FINISHED_PRODUCT
+}
+
+enum InventoryLocation {
+  POINT_OF_SALE
+  WAREHOUSE
+}
+
+enum MovementType {
+  INPUT // Compra / entrada de mercancía
+  OUTPUT // Salida manual (merma, daño, vencimiento)
+  TRANSFER_WH_TO_POS // Traslado bodega -> punto de venta (genera 2 registros)
+  MANUAL_ADJUSTMENT // Ajuste por conteo físico
+  SALE_CONSUMPTION // Descuento automático por venta (incluye cortesías)
+  SALE_REVERSAL // Reintegro de inventario al anular una venta
+}
+
+enum SaleStatus {
+  APPROVED
+  PENDING
+  REJECTED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  TRANSFER
+  CARD_TERMINAL
+  COURTESY
+}
+
+enum CourtesyType {
+  ADMINISTRADOR
+  VENDEDOR
+  INVITADO
+}
+
+enum SaleMode {
+  INDIVIDUAL
+  TABLE_GROUP
+}
+
+enum OpenTableStatus {
+  OPEN
+  CLOSED // Cobrada
+  CANCELLED // Eliminada sin cobrar
+}
+
+// ----------------------------------------------------------------------------
+//  A. Usuarios y autenticación
+// ----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(160)
+  passwordHash String   @map("password_hash") @db.VarChar(100)
+  role         Role     @default(EMPLOYEE)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  refreshTokens  RefreshToken[]
+  shifts         SellerShift[]
+  sales          Sale[]              @relation("SaleSeller")
+  refundedSales  Sale[]              @relation("SaleRefundedBy")
+  movements      InventoryMovement[]
+  openedTables   OpenTable[]
+  openTableItems OpenTableItem[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64) // SHA-256 del token
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ----------------------------------------------------------------------------
+//  B. Catálogo de productos
+// ----------------------------------------------------------------------------
+
+model Product {
+  id                     String   @id @default(uuid()) @db.VarChar(64)
+  name                   String   @db.VarChar(120)
+  category               String   @db.VarChar(60)
+  price                  Int // COP
+  isActive               Boolean  @default(true) @map("is_active")
+  description            String?
+  preparationTimeSeconds Int      @default(0) @map("preparation_time_seconds")
+  // Solo para productos de la categoría "Leches": insumo del punto de venta que
+  // REEMPLAZA a la leche base de la receta cuando el cliente elige esta opción.
+  milkInventoryItemId    String?  @map("milk_inventory_item_id") @db.VarChar(64)
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  milkInventoryItem InventoryItem?  @relation("ProductMilkItem", fields: [milkInventoryItemId], references: [id], onDelete: Restrict)
+  recipe            Recipe?
+  openTableItems    OpenTableItem[]
+  saleItems         SaleItem[]
+
+  @@index([category])
+  @@index([updatedAt])
+  @@map("products")
+}
+
+// ----------------------------------------------------------------------------
+//  C. Inventario (Punto de venta / Bodega) y su auditoría
+// ----------------------------------------------------------------------------
+
+model InventoryItem {
+  id           String            @id @db.VarChar(64) // ej: pos_cafe, wh_cafe
+  // Clave que une el mismo insumo en ambas ubicaciones (ej: "cafe").
+  // Permite trasladar wh_cafe -> pos_cafe sin ambigüedad.
+  baseKey      String            @map("base_key") @db.VarChar(64)
+  name         String            @db.VarChar(120)
+  type         InventoryItemType
+  location     InventoryLocation
+  currentStock Decimal           @default(0) @map("current_stock") @db.Decimal(14, 3)
+  minimumStock Decimal           @default(0) @map("minimum_stock") @db.Decimal(14, 3)
+  unit         String            @db.VarChar(16) // g, ml, unidad, oz, kg, L
+  unitCost     Decimal           @default(0) @map("unit_cost") @db.Decimal(14, 4) // COP por unidad base
+  supplier     String?           @db.VarChar(120)
+  isActive     Boolean           @default(true) @map("is_active")
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  movements         InventoryMovement[]
+  recipeIngredients RecipeIngredient[]
+  milkProducts      Product[]           @relation("ProductMilkItem")
+
+  @@unique([baseKey, location])
+  @@index([location])
+  @@index([updatedAt])
+  @@map("inventory_items")
+}
+
+/// Libro mayor (ledger) inmutable de inventario. Nunca se edita ni se borra.
+model InventoryMovement {
+  id                  String             @id @default(uuid()) @db.Uuid
+  createdAt           DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  type                MovementType
+  inventoryItemId     String             @map("inventory_item_id") @db.VarChar(64)
+  itemName            String             @map("item_name") @db.VarChar(120)
+  quantity            Decimal            @db.Decimal(14, 3) // Delta con signo: + entra, - sale
+  stockAfter          Decimal            @map("stock_after") @db.Decimal(14, 3)
+  unit                String             @db.VarChar(16)
+  unitCost            Decimal            @map("unit_cost") @db.Decimal(14, 4)
+  originLocation      InventoryLocation? @map("origin_location")
+  destinationLocation InventoryLocation? @map("destination_location")
+  reason              String?
+  userId              String?            @map("user_id") @db.Uuid
+  userName            String?            @map("user_name") @db.VarChar(120)
+  saleId              String?            @map("sale_id") @db.Uuid
+  transferGroupId     String?            @map("transfer_group_id") @db.Uuid
+
+  item InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+  user User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  sale Sale?         @relation(fields: [saleId], references: [id], onDelete: Restrict)
+
+  @@index([inventoryItemId, createdAt])
+  @@index([type, createdAt])
+  @@index([saleId])
+  @@index([createdAt])
+  @@map("inventory_movements")
+}
+
+// ----------------------------------------------------------------------------
+//  D. Recetas (escandallos)
+// ----------------------------------------------------------------------------
+
+model Recipe {
+  id                     String   @id @default(uuid()) @db.Uuid
+  productId              String   @unique @map("product_id") @db.VarChar(64)
+  preparationTimeSeconds Int      @default(0) @map("preparation_time_seconds")
+  isActive               Boolean  @default(true) @map("is_active")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  product     Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
+  ingredients RecipeIngredient[]
+
+  @@map("recipes")
+}
+
+/// Cantidad de un insumo (siempre del PUNTO DE VENTA) que consume 1 unidad del producto.
+/// Incluye el vaso exacto según tamaño (vaso cartón 7oz, plástico 14oz, ...).
+model RecipeIngredient {
+  id              String  @id @default(uuid()) @db.Uuid
+  recipeId        String  @map("recipe_id") @db.Uuid
+  inventoryItemId String  @map("inventory_item_id") @db.VarChar(64)
+  quantity        Decimal @db.Decimal(14, 3) // En la unidad base del insumo
+  // true = es "la leche" de la bebida: se sustituye si el cliente elige otra leche.
+  isMilk          Boolean @default(false) @map("is_milk")
+
+  recipe Recipe       @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  item   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Restrict)
+
+  @@unique([recipeId, inventoryItemId])
+  @@map("recipe_ingredients")
+}
+
+// ----------------------------------------------------------------------------
+//  E. Mesas / cuentas abiertas
+// ----------------------------------------------------------------------------
+
+model OpenTable {
+  id             String          @id @default(uuid()) @db.Uuid
+  label          String          @db.VarChar(60) // "Mesa 1", "Mesa 4 - Carlos"
+  // Etiqueta normalizada SOLO mientras está abierta (NULL al cerrar/cancelar).
+  // El índice único impide dos mesas abiertas con el mismo nombre.
+  activeLabelKey String?         @unique @map("active_label_key") @db.VarChar(60)
+  status         OpenTableStatus @default(OPEN)
+  notes          String?
+  openedById     String          @map("opened_by_id") @db.Uuid
+  openedByName   String          @map("opened_by_name") @db.VarChar(120)
+  version        Int             @default(1) // Sube con cada cambio: el cliente descarta eventos viejos
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  closedAt       DateTime?       @map("closed_at") @db.Timestamptz(3)
+
+  openedBy User            @relation(fields: [openedById], references: [id], onDelete: Restrict)
+  items    OpenTableItem[]
+  sale     Sale?
+
+  @@index([status])
+  @@map("open_tables")
+}
+
+model OpenTableItem {
+  id           String   @id @default(uuid()) @db.Uuid
+  openTableId  String   @map("open_table_id") @db.Uuid
+  productId    String   @map("product_id") @db.VarChar(64)
+  productName  String   @map("product_name") @db.VarChar(120)
+  quantity     Int
+  unitPrice    Int      @map("unit_price") // Precio base + adiciones, congelado al agregar
+  subtotal     Int
+  // [{ productId, name, price, kind: "TOPPING" | "MILK" }]
+  modifiers    Json     @default("[]")
+  observations String?
+  sellerId     String   @map("seller_id") @db.Uuid
+  sellerName   String   @map("seller_name") @db.VarChar(120)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  table   OpenTable @relation(fields: [openTableId], references: [id], onDelete: Cascade)
+  product Product   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  seller  User      @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  @@index([openTableId])
+  @@map("open_table_items")
+}
+
+// ----------------------------------------------------------------------------
+//  F. Ventas, pagos y cortesías
+// ----------------------------------------------------------------------------
+
+model Sale {
+  id                  String        @id @default(uuid()) @db.Uuid
+  ticketNumber        Int           @unique @default(autoincrement()) @map("ticket_number") // "1058"
+  // Idempotencia: UUID generado por el celular. Si la red falla y el cliente
+  // reintenta, NO se duplica la venta ni se descuenta dos veces el inventario.
+  clientRequestId     String        @unique @map("client_request_id") @db.VarChar(64)
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  subtotal            Int // Valor comercial de los productos
+  total               Int // Lo cobrado (0 en cortesías)
+  status              SaleStatus    @default(APPROVED)
+  sellerId            String        @map("seller_id") @db.Uuid
+  sellerName          String        @map("seller_name") @db.VarChar(120)
+  shiftId             String?       @map("shift_id") @db.Uuid
+  openTableId         String?       @unique @map("open_table_id") @db.Uuid
+  tableLabel          String?       @map("table_label") @db.VarChar(60)
+  ingredientCost      Int           @default(0) @map("ingredient_cost") // Costo real de insumos
+  grossMargin         Int           @default(0) @map("gross_margin") // total - ingredient_cost
+  isCourtesy          Boolean       @default(false) @map("is_courtesy")
+  courtesyBeneficiary String?       @map("courtesy_beneficiary") @db.VarChar(120)
+  courtesyType        CourtesyType? @map("courtesy_type")
+  courtesyNotes       String?       @map("courtesy_notes")
+  refundedAt          DateTime?     @map("refunded_at") @db.Timestamptz(3)
+  refundedById        String?       @map("refunded_by_id") @db.Uuid
+  refundReason        String?       @map("refund_reason")
+
+  seller     User                @relation("SaleSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+  refundedBy User?               @relation("SaleRefundedBy", fields: [refundedById], references: [id], onDelete: SetNull)
+  shift      SellerShift?        @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  openTable  OpenTable?          @relation(fields: [openTableId], references: [id], onDelete: SetNull)
+  items      SaleItem[]
+  payments   SalePayment[]
+  movements  InventoryMovement[]
+
+  @@index([createdAt])
+  @@index([sellerId, createdAt])
+  @@index([shiftId])
+  @@index([status, createdAt])
+  @@index([isCourtesy, createdAt])
+  @@map("sales")
+}
+
+model SaleItem {
+  id             String   @id @default(uuid()) @db.Uuid
+  saleId         String   @map("sale_id") @db.Uuid
+  productId      String   @map("product_id") @db.VarChar(64)
+  productName    String   @map("product_name") @db.VarChar(120)
+  quantity       Int
+  unitPrice      Int      @map("unit_price") // price_at_sale (base + adiciones)
+  subtotal       Int
+  modifiers      Json     @default("[]") // toppings + leche seleccionada
+  observations   String?
+  saleMode       SaleMode @default(INDIVIDUAL) @map("sale_mode")
+  tableLabel     String?  @map("table_label") @db.VarChar(60)
+  ingredientCost Int      @default(0) @map("ingredient_cost")
+
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+/// Una venta puede tener varios pagos (ej: parte efectivo, parte transferencia).
+model SalePayment {
+  id             String        @id @default(uuid()) @db.Uuid
+  saleId         String        @map("sale_id") @db.Uuid
+  method         PaymentMethod
+  amount         Int // Lo que se abona a la venta con este método
+  reference      String?       @db.VarChar(80) // Transferencia / datáfono
+  receivedAmount Int?          @map("received_amount") // Efectivo entregado por el cliente
+  changeAmount   Int?          @map("change_amount") // Vuelto
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@index([method])
+  @@map("sale_payments")
+}
+
+// ----------------------------------------------------------------------------
+//  G. Turnos de vendedores (apertura / cierre de caja)
+// ----------------------------------------------------------------------------
+
+model SellerShift {
+  id                  String    @id @default(uuid()) @db.Uuid
+  sellerId            String    @map("seller_id") @db.Uuid
+  sellerName          String    @map("seller_name") @db.VarChar(120)
+  dateKey             String    @map("date_key") @db.VarChar(10) // "yyyy-MM-dd" (hora Colombia)
+  openedAt            DateTime  @default(now()) @map("opened_at") @db.Timestamptz(3)
+  closedAt            DateTime? @map("closed_at") @db.Timestamptz(3)
+  startingCash        Int       @map("starting_cash")
+  // Los totales se calculan en vivo desde las ventas y se congelan al cerrar.
+  totalSalesCollected Int       @default(0) @map("total_sales_collected")
+  totalTickets        Int       @default(0) @map("total_tickets")
+  cashCollected       Int?      @map("cash_collected")
+  expectedCash        Int?      @map("expected_cash") // starting_cash + efectivo cobrado
+  countedCash         Int?      @map("counted_cash") // Lo que el vendedor contó al cerrar
+  cashDifference      Int?      @map("cash_difference") // counted - expected (faltante/sobrante)
+  closingNotes        String?   @map("closing_notes")
+
+  seller User   @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  sales  Sale[]
+
+  @@unique([sellerId, dateKey]) // Un turno por vendedor por día
+  @@index([dateKey])
+  @@map("seller_shifts")
+}
