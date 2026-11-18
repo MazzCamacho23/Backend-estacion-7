@@ -28,6 +28,21 @@ import { computeConsumption, lineInputSchema, parseModifiers, type PricedLine, p
 //  Validación de entrada
 // ----------------------------------------------------------------------------
 
+const COURTESY_ALIASES: Record<string, CourtesyType> = {
+  ADMINISTRADOR: CourtesyType.ADMINISTRADOR, ADMINISTRADORA: CourtesyType.ADMINISTRADOR, ADMIN: CourtesyType.ADMINISTRADOR,
+  DUENO: CourtesyType.ADMINISTRADOR, DUENA: CourtesyType.ADMINISTRADOR, DUENOS: CourtesyType.ADMINISTRADOR, OWNER: CourtesyType.ADMINISTRADOR,
+  SOCIO: CourtesyType.ADMINISTRADOR, SOCIA: CourtesyType.ADMINISTRADOR,
+  VENDEDOR: CourtesyType.VENDEDOR, VENDEDORA: CourtesyType.VENDEDOR, EMPLEADO: CourtesyType.VENDEDOR, EMPLEADA: CourtesyType.VENDEDOR,
+  EMPLOYEE: CourtesyType.VENDEDOR, STAFF: CourtesyType.VENDEDOR, BARISTA: CourtesyType.VENDEDOR, TRABAJADOR: CourtesyType.VENDEDOR,
+  INVITADO: CourtesyType.INVITADO, INVITADA: CourtesyType.INVITADO, CLIENTE: CourtesyType.INVITADO, GENERAL: CourtesyType.INVITADO,
+};
+
+function normalizeCourtesyType(v: unknown): unknown {
+  if (typeof v !== 'string') return v;
+  const key = v.normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+  return COURTESY_ALIASES[key] ?? CourtesyType.INVITADO;
+}
+
 const paymentSchema = z.object({
   method: z.nativeEnum(PaymentMethod),
   amount: z.number().int().min(0),
@@ -46,7 +61,9 @@ export const checkoutSchema = z
     courtesy: z
       .object({
         beneficiary: z.string().trim().min(2).max(120),
-        type: z.nativeEnum(CourtesyType),
+        // La app permite escribir el tipo a mano ("Admin", "empleado", "Dueña"...):
+        // se normaliza a los 3 tipos oficiales. Lo que no se reconoce = INVITADO.
+        type: z.preprocess(normalizeCourtesyType, z.nativeEnum(CourtesyType)),
         notes: z.string().trim().max(500).nullish(),
       })
       .nullish(),
