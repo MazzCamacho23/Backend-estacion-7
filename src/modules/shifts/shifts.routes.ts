@@ -18,6 +18,16 @@ shiftsRouter.get('/current', async (req, res) => {
   res.json(await svc.getCurrentShift(currentUser(req)));
 });
 
+/** Resumen completo del turno abierto (ventas, pagos, efectivo esperado, productos): { shift: null } si no hay. */
+shiftsRouter.get('/current/summary', async (req, res) => {
+  res.json(await svc.getCurrentShiftSummary(currentUser(req)));
+});
+
+/** Resumen completo de cualquier turno (el vendedor solo los suyos). */
+shiftsRouter.get('/:id/summary', async (req, res) => {
+  res.json(await svc.getShiftSummaryById(uuidParam.parse(req.params).id, currentUser(req)));
+});
+
 shiftsRouter.get('/', async (req, res) => {
   const q = z
     .object({

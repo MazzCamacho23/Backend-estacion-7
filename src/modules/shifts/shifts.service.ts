@@ -105,6 +105,104 @@ export async function getShift(id: string, user: AuthUser) {
   return shiftView(await getShiftForUser(id, user));
 }
 
+/**
+ * Resumen para el cierre de caja (y para "Ventas de hoy" del vendedor): todas las
+ * ventas del turno con sus pagos, totales por método, efectivo esperado,
+ * cortesías, anulaciones y productos vendidos. Los vendedores no reciben costos.
+ */
+export async function getShiftSummary(shift: SellerShift, user: AuthUser) {
+  const isOwner = user.role === 'OWNER';
+  const view = await shiftView(shift);
+  const sales = await prisma.sale.findMany({
+    where: { shiftId: shift.id },
+    include: { items: true, payments: true },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const approved = sales.filter((s) => s.status === SaleStatus.APPROVED);
+  const refunded = sales.filter((s) => s.status === SaleStatus.REFUNDED);
+  const courtesies = approved.filter((s) => s.isCourtesy);
+  const cashPayments = approved.flatMap((s) => s.payments).filter((p) => p.method === PaymentMethod.CASH);
+
+  const products = new Map<string, { productId: string; productName: string; units: number; revenue: number; courtesyUnits: number }>();
+  for (const s of approved) {
+    for (const i of s.items) {
+      const p = products.get(i.productId) ?? { productId: i.productId, productName: i.productName, units: 0, revenue: 0, courtesyUnits: 0 };
+      p.units += i.quantity;
+      if (s.isCourtesy) p.courtesyUnits += i.quantity;
+      else p.revenue += i.subtotal;
+      products.set(i.productId, p);
+    }
+  }
+
+  return {
+    shift: view,
+    totals: {
+      tickets: approved.length,
+      paidTickets: approved.length - courtesies.length,
+      collected: view.live.totalSalesCollected,
+      byMethod: view.live.byMethod,
+      unitsSold: approved.reduce((a, s) => a + s.items.reduce((b, i) => b + i.quantity, 0), 0),
+      averageTicket: approved.length - courtesies.length ? Math.round(view.live.totalSalesCollected / (approved.length - courtesies.length)) : 0,
+    },
+    cash: {
+      startingCash: shift.startingCash,
+      cashSales: view.live.cashCollected,
+      receivedFromCustomers: cashPayments.reduce((a, p) => a + (p.receivedAmount ?? p.amount), 0),
+      changeGiven: cashPayments.reduce((a, p) => a + (p.changeAmount ?? 0), 0),
+      expectedCash: view.live.expectedCash,
+    },
+    courtesies: {
+      count: courtesies.length,
+      retailValue: courtesies.reduce((a, s) => a + s.subtotal, 0),
+      ...(isOwner ? { cost: courtesies.reduce((a, s) => a + s.ingredientCost, 0) } : {}),
+    },
+    refunds: {
+      count: refunded.length,
+      amount: refunded.reduce((a, s) => a + s.total, 0),
+    },
+    ...(isOwner
+      ? {
+          profit: {
+            ingredientCost: approved.reduce((a, s) => a + s.ingredientCost, 0),
+            grossMargin: approved.reduce((a, s) => a + s.grossMargin, 0),
+          },
+        }
+      : {}),
+    products: [...products.values()].sort((a, b) => b.units - a.units || b.revenue - a.revenue),
+    sales: sales.map((s) => ({
+      id: s.id,
+      ticketNumber: s.ticketNumber,
+      createdAt: s.createdAt,
+      status: s.status,
+      subtotal: s.subtotal,
+      total: s.total,
+      isCourtesy: s.isCourtesy,
+      courtesyBeneficiary: s.courtesyBeneficiary,
+      courtesyType: s.courtesyType,
+      tableLabel: s.tableLabel,
+      refundReason: s.refundReason,
+      payments: s.payments.map((p) => ({
+        method: p.method, amount: p.amount, reference: p.reference, receivedAmount: p.receivedAmount, changeAmount: p.changeAmount,
+      })),
+      items: s.items.map((i) => ({
+        productId: i.productId, productName: i.productName, quantity: i.quantity, unitPrice: i.unitPrice, subtotal: i.subtotal,
+        modifiers: i.modifiers, observations: i.observations,
+      })),
+      ...(isOwner ? { ingredientCost: s.ingredientCost, grossMargin: s.grossMargin } : {}),
+    })),
+  };
+}
+
+export async function getCurrentShiftSummary(user: AuthUser) {
+  const shift = await findOpenShift(prisma, user.id);
+  return shift ? getShiftSummary(shift, user) : { shift: null };
+}
+
+export async function getShiftSummaryById(id: string, user: AuthUser) {
+  return getShiftSummary(await getShiftForUser(id, user), user);
+}
+
 /** Cierre de caja: congela totales y calcula faltante/sobrante. */
 export async function closeShift(id: string, input: { countedCash: number; notes?: string | null }, user: AuthUser) {
   await getShiftForUser(id, user);
